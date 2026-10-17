@@ -1,0 +1,108 @@
+# ============================================================
+#  两个项目 + 一个 MySQL + Caddy（自动 HTTPS）的部署编排
+#
+#  服务器目录约定：
+#    /opt/apps/
+#      ├─ ai-app/        git clone 考研复习助手
+#      ├─ order-app/     git clone 点餐系统
+#      └─ deploy/        本目录（compose 从这里启动）
+#
+#  为什么两个项目共用一个 MySQL？
+#    2 核 2G 的小机器，跑两个 MySQL 太浪费（每个至少 300MB 内存）。
+#    这里一个实例、两个库（ai_kb / wechat_ordering），用不同的库名隔离。
+#
+#  为什么用 Caddy 而不是 Nginx？
+#    Caddy 能自动申请并续期 Let's Encrypt 证书，配置文件只有几行；
+#    Nginx 要额外装 certbot、写定时任务，小项目没必要。
+# ============================================================
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: aiorder-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # ngram 分词大小，中文全文检索依赖它
+      - --ngram_token_size=2
+      # 小内存机器限制缓冲池，否则 MySQL 会吃掉大半内存
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 首次启动时自动执行：两个项目的建库脚本
+      # 文件名前的 01/02 决定执行顺序（MySQL 按字母序执行 initdb.d）
+      - ../ai-app/backend/schema.sql:/docker-entrypoint-initdb.d/01-ai.sql:ro
+      - ../order-app/build-database.sql:/docker-entrypoint-initdb.d/02-order.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 700m
+
+  app-ai:
+    build:
+      context: ../ai-app
+      dockerfile: Dockerfile
+    container_name: aiorder-ai
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ai_kb?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      # 没有 key 也能跑（自动降级为本地模拟模式）
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      RAG_SEED_DIR: /app/seed
+      TZ: Asia/Shanghai
+      JAVA_TOOL_OPTIONS: "-Xmx320m -Dfile.encoding=UTF-8"
+    mem_limit: 640m
+
+  app-order:
+    build:
+      context: ../order-app
+      dockerfile: Dockerfile
+    container_name: aiorder-order
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/wechat_ordering?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+      JAVA_TOOL_OPTIONS: "-Xmx320m -Dfile.encoding=UTF-8"
+    mem_limit: 640m
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: aiorder-caddy
+    restart: unless-stopped
+    depends_on:
+      - app-ai
+      - app-order
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      AI_DOMAIN: ${AI_DOMAIN}
+      ORDER_DOMAIN: ${ORDER_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    mem_limit: 128m
+
+volumes:
+  mysql-data:
+  caddy-data:
+  caddy-config:
