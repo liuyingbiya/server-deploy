@@ -1,0 +1,84 @@
+# ============================================================
+#  试用机版（北京 / 无域名 / 无 HTTPS）
+#
+#  用途：在阿里云 ECS 试用实例上快速验证部署是否跑得通。
+#        没有域名、没有备案，所以直接暴露端口，用 IP 访问：
+#          http://服务器IP:8080   → 点餐系统
+#          http://服务器IP:8081   → 考研复习助手
+#
+#  与正式版的区别：
+#    · 没有 Caddy（不申请证书）
+#    · 两个应用直接映射端口
+#    · 其余（MySQL、字符集、内存限制、建库脚本）完全一致
+#
+#  用法：
+#    docker compose -f docker-compose.ip.yml up -d --build
+# ============================================================
+services:
+
+  mysql:
+    image: mysql:8.0
+    container_name: aiorder-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --ngram_token_size=2
+      - --innodb-buffer-pool-size=128M
+      - --performance-schema=OFF
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ../ai-app/backend/schema.sql:/docker-entrypoint-initdb.d/01-ai.sql:ro
+      - ../order-app/build-database.sql:/docker-entrypoint-initdb.d/02-order.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    mem_limit: 700m
+
+  app-ai:
+    build:
+      context: ../ai-app
+      dockerfile: Dockerfile
+    container_name: aiorder-ai
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/ai_kb?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY}
+      RAG_SEED_DIR: /app/seed
+      TZ: Asia/Shanghai
+      JAVA_TOOL_OPTIONS: "-Xmx320m -Dfile.encoding=UTF-8"
+    mem_limit: 640m
+
+  app-order:
+    build:
+      context: ../order-app
+      dockerfile: Dockerfile
+    container_name: aiorder-order
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/wechat_ordering?useSSL=false&serverTimezone=Asia/Shanghai&characterEncoding=UTF-8&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: root
+      SPRING_DATASOURCE_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Shanghai
+      JAVA_TOOL_OPTIONS: "-Xmx320m -Dfile.encoding=UTF-8"
+    mem_limit: 640m
+
+volumes:
+  mysql-data:
