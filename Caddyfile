@@ -1,0 +1,39 @@
+# ============================================================
+#  Caddy 配置：反代 + 自动 HTTPS
+#
+#  {$变量} 是 Caddy 的环境变量占位符，值来自 docker-compose 里的 environment。
+#  证书由 Caddy 自动向 Let's Encrypt 申请并续期，不需要手动上传。
+#
+#  前提：域名已经解析到这台服务器的公网 IP（A 记录），
+#        且服务器的 80 / 443 端口在防火墙里放行。
+#        否则证书申请会失败，浏览器访问会是 https 报错。
+# ============================================================
+
+{
+	# 证书到期提醒邮箱（Let's Encrypt 要求）
+	email {$ACME_EMAIL}
+}
+
+# ---------- 考研复习助手 ----------
+{$AI_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app-ai:8081
+	log {
+		output file /data/ai-access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+	}
+}
+
+# ---------- 点餐系统 ----------
+{$ORDER_DOMAIN} {
+	encode zstd gzip
+	reverse_proxy app-order:8080
+	log {
+		output file /data/order-access.log {
+			roll_size 10mb
+			roll_keep 3
+		}
+	}
+}
